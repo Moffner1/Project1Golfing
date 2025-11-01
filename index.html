@@ -1,0 +1,384 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Golf Scorecard</title>
+  <!-- Tailwind CSS (CDN) -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <meta name="theme-color" content="#16a34a">
+</head>
+<body class="bg-neutral-100 text-neutral-900">
+  <div id="root"></div>
+
+  <!-- React 18 UMD + Babel (for JSX in-browser) -->
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+  <script type="text/babel">
+    const { useEffect, useMemo, useRef, useState } = React;
+
+    const STORAGE_KEY = "golf-scorecard-v1";
+    const clamp = (n, min, max) => Math.max(min, Math.min(max, n));
+
+    function usePersistentState(initial) {
+      const [state, setState] = useState(() => {
+        try {
+          const raw = localStorage.getItem(STORAGE_KEY);
+          return raw ? JSON.parse(raw) : initial;
+        } catch {
+          return initial;
+        }
+      });
+      useEffect(() => {
+        try { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); } catch {}
+      }, [state]);
+      return [state, setState];
+    }
+
+    function useWakeLock(enabled) {
+      const wakeLockRef = useRef(null);
+      useEffect(() => {
+        async function request() {
+          try {
+            if (enabled && 'wakeLock' in navigator) {
+              wakeLockRef.current = await navigator.wakeLock.request('screen');
+            }
+          } catch (e) {}
+        }
+        request();
+        const onVisibility = () => {
+          if (document.visibilityState === 'visible' && enabled) request();
+        };
+        document.addEventListener('visibilitychange', onVisibility);
+        return () => {
+          document.removeEventListener('visibilitychange', onVisibility);
+          try { wakeLockRef.current?.release?.(); } catch(_) {}
+          wakeLockRef.current = null;
+        };
+      }, [enabled]);
+    }
+
+    function GolfScorecardApp() {
+      const [model, setModel] = usePersistentState({
+        phase: "setup",
+        numHoles: 9,
+        players: [{ name: "Player 1", strokes: [] }],
+        history: [],
+        selected: null,
+        keepAwake: true
+      });
+
+      useWakeLock(model.keepAwake && model.phase === 'play');
+
+      useEffect(() => {
+        setModel(prev => {
+          const next = { ...prev };
+          next.players = prev.players.map(p => ({
+            ...p,
+            strokes: Array.from({ length: prev.numHoles }, (_, i) => p.strokes?.[i] ?? null)
+          }));
+          return next;
+        });
+      }, [model.numHoles]);
+
+      const totals = useMemo(() => model.players.map(p =>
+        p.strokes.reduce((sum, v) => sum + (typeof v === 'number' ? v : 0), 0)
+      ), [model.players]);
+
+      const isSetup = model.phase === "setup";
+
+      function startRound() {
+        setModel(prev => ({ ...prev, phase: 'play', history: [], selected: null }));
+      }
+      function addPlayer() {
+        setModel(prev => {
+          if (prev.players.length >= 4) return prev;
+          return { ...prev, players: [...prev.players, { name: "Player " + (prev.players.length + 1), strokes: Array(prev.numHoles).fill(null) }] };
+        });
+      }
+      function removePlayer(idx) {
+        setModel(prev => {
+          if (prev.players.length <= 1) return prev;
+          const copy = [...prev.players];
+          copy.splice(idx, 1);
+          return { ...prev, players: copy };
+        });
+      }
+      function updatePlayerName(idx, name) {
+        setModel(prev => {
+          const copy = [...prev.players];
+          copy[idx] = { ...copy[idx], name };
+          return { ...prev, players: copy };
+        });
+      }
+      function setStroke(playerIdx, holeIdx, value) {
+        setModel(prev => {
+          const players = prev.players.map((p, i) => i === playerIdx
+            ? { ...p, strokes: p.strokes.map((s, h) => h === holeIdx ? value : s) }
+            : p
+          );
+          const prevValue = prev.players[playerIdx].strokes[holeIdx] ?? null;
+          const history = [...prev.history, { playerIdx, holeIdx, prevValue, newValue: value }];
+          return { ...prev, players, history };
+        });
+      }
+      function undo() {
+        setModel(prev => {
+          const history = [...prev.history];
+          const last = history.pop();
+          if (!last) return prev;
+          const players = prev.players.map((p, i) => i === last.playerIdx
+            ? { ...p, strokes: p.strokes.map((s, h) => h === last.holeIdx ? last.prevValue : s) }
+            : p);
+          return { ...prev, players, history };
+        });
+      }
+      function resetAll() {
+        if (!confirm('Reset the entire round?')) return;
+        setModel(prev => ({
+          ...prev,
+          players: prev.players.map(p => ({ ...p, strokes: Array(prev.numHoles).fill(null) })),
+          history: [],
+          selected: null,
+          phase: 'setup'
+        }));
+      }
+      function onCellClick(playerIdx, holeIdx) {
+        setModel(prev => ({ ...prev, selected: { playerIdx, holeIdx } }));
+      }
+
+      return (
+        <div className="min-h-screen bg-neutral-100 text-neutral-900 flex flex-col items-stretch">
+          <header className="sticky top-0 z-10 bg-white/80 backdrop-blur border-b border-neutral-200 p-4 flex items-center justify-between">
+            <div className="text-xl font-semibold">Golf Scorecard</div>
+            <div className="flex items-center gap-2">
+              {!isSetup && (
+                <label className="flex items-center gap-2 text-sm">
+                  <input type="checkbox" className="size-4" checked={model.keepAwake}
+                         onChange={e => setModel(prev => ({ ...prev, keepAwake: e.target.checked }))} />
+                  Keep screen awake
+                </label>
+              )}
+              <button onClick={undo} className="px-3 py-2 rounded-xl bg-neutral-200 active:scale-95">Undo</button>
+              <button onClick={resetAll} className="px-3 py-2 rounded-xl bg-red-500 text-white active:scale-95">Reset</button>
+            </div>
+          </header>
+
+          {isSetup ? (
+            <SetupScreen model={model} setModel={setModel} startRound={startRound}
+              addPlayer={addPlayer} removePlayer={removePlayer} updatePlayerName={updatePlayerName} />
+          ) : (
+            <PlayScreen model={model} totals={totals} onCellClick={onCellClick} setStroke={setStroke} setModel={setModel} />
+          )}
+
+          <footer className="p-3 text-center text-xs text-neutral-500">No backend • Local persistence • Mobile‑first</footer>
+        </div>
+      );
+    }
+
+    function SetupScreen({ model, setModel, startRound, addPlayer, removePlayer, updatePlayerName }) {
+      return (
+        <main className="flex-1 p-4 flex flex-col gap-4">
+          <section className="bg-white rounded-2xl shadow-sm p-4">
+            <h2 className="font-semibold text-lg mb-2">Round</h2>
+            <div className="grid grid-cols-2 gap-2">
+              {[9, 18].map(n => (
+                <button key={n} onClick={() => setModel(prev => ({ ...prev, numHoles: n }))}
+                        className={"px-4 py-3 rounded-xl border " + (model.numHoles === n ? "border-neutral-900 bg-neutral-100" : "border-neutral-300")}>
+                  {n} Holes
+                </button>
+              ))}
+            </div>
+          </section>
+
+          <section className="bg-white rounded-2xl shadow-sm p-4">
+            <h2 className="font-semibold text-lg mb-3">Players ({model.players.length}/4)</h2>
+            <div className="flex flex-col gap-3">
+              {model.players.map((p, i) => (
+                <div key={i} className="flex items-center gap-2">
+                  <input
+                    className="flex-1 px-3 py-3 rounded-xl border border-neutral-300"
+                    value={p.name}
+                    onChange={e => updatePlayerName(i, e.target.value)}
+                    placeholder={"Player " + (i + 1)}
+                    inputMode="text"
+                  />
+                  <button onClick={() => removePlayer(i)} disabled={model.players.length === 1}
+                          className="px-3 py-2 rounded-xl border border-neutral-300 disabled:opacity-40">Remove</button>
+                </div>
+              ))}
+              <button onClick={addPlayer} disabled={model.players.length >= 4}
+                      className="px-4 py-3 rounded-2xl bg-neutral-900 text-white disabled:opacity-40">Add player</button>
+            </div>
+          </section>
+
+          <button onClick={startRound}
+                  className="mt-auto w-full py-4 rounded-2xl bg-green-600 text-white text-lg active:scale-95">Start Round</button>
+        </main>
+      );
+    }
+
+    function PlayScreen({ model, totals, onCellClick, setStroke, setModel }) {
+      const holes = React.useMemo(() => Array.from({ length: model.numHoles }, (_, i) => i + 1), [model.numHoles]);
+      const selected = model.selected;
+
+      return (
+        <main className="flex-1 p-2 flex flex-col gap-2">
+          <div className="overflow-auto bg-white rounded-2xl shadow-sm">
+            <table className="min-w-full text-sm">
+              <thead className="sticky top-0 bg-neutral-50">
+                <tr>
+                  <th className="text-left p-3 w-40">Player</th>
+                  {holes.map(h => (<th key={h} className="px-2 py-3 text-center">H{h}</th>))}
+                  <th className="px-2 py-3 text-center">Total</th>
+                </tr>
+              </thead>
+              <tbody>
+                {model.players.map((p, i) => (
+                  <tr key={i} className="border-t">
+                    <td className="p-3 font-medium">
+                      <InlineEdit
+                        text={p.name}
+                        onChange={name => setModel(prev => {
+                          const copy = [...prev.players];
+                          copy[i] = { ...copy[i], name };
+                          return { ...prev, players: copy };
+                        })}
+                      />
+                    </td>
+                    {holes.map((h, hi) => {
+                      const v = p.strokes[hi];
+                      const isSel = selected && selected.playerIdx === i && selected.holeIdx === hi;
+                      return (
+                        <td key={h} className="px-1 py-1">
+                          <button
+                            onClick={() => onCellClick(i, hi)}
+                            className={"w-12 h-12 rounded-xl border text-base flex items-center justify-center mx-auto active:scale-95 " + (isSel ? "border-neutral-900 bg-neutral-100" : "border-neutral-300")}
+                          >
+                            {typeof v === 'number' ? v : '—'}
+                          </button>
+                        </td>
+                      );
+                    })}
+                    <td className="px-2 py-1 text-center font-semibold">{totals[i]}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          {selected && (
+            <Keypad
+              value={getSelectedValue(model)}
+              onClose={() => setModel(prev => ({ ...prev, selected: null }))}
+              onClear={() => applyToSelected(model, setStroke, null)}
+              onSubmit={(num) => applyToSelected(model, setStroke, num)}
+            />
+          )}
+
+          <div className="grid grid-cols-2 gap-2 mt-2">
+            <button
+              className="py-3 rounded-xl border border-neutral-300 active:scale-95"
+              onClick={() => setModel(prev => ({ ...prev, phase: 'setup' }))}
+            >Change players/holes</button>
+            <button
+              className="py-3 rounded-xl border border-neutral-300 active:scale-95"
+              onClick={() => setModel(prev => ({ ...prev, selected: { playerIdx: 0, holeIdx: 0 } }))}
+            >Jump to H1</button>
+          </div>
+        </main>
+      );
+    }
+
+    function getSelectedValue(model) {
+      const sel = model.selected;
+      if (!sel) return null;
+      const v = model.players[sel.playerIdx]?.strokes?.[sel.holeIdx];
+      return typeof v === 'number' ? v : null;
+    }
+
+    function applyToSelected(model, setStroke, newValue) {
+      const sel = model.selected;
+      if (!sel) return;
+      setStroke(sel.playerIdx, sel.holeIdx, newValue);
+    }
+
+    function InlineEdit({ text, onChange }) {
+      const [editing, setEditing] = useState(false);
+      const [val, setVal] = useState(text);
+      const inputRef = useRef(null);
+
+      useEffect(() => setVal(text), [text]);
+      useEffect(() => { if (editing) inputRef.current?.focus(); }, [editing]);
+
+      return (
+        <div>
+          {editing ? (
+            <input
+              ref={inputRef}
+              className="w-full px-2 py-2 rounded-lg border border-neutral-300"
+              value={val}
+              onChange={e => setVal(e.target.value)}
+              onBlur={() => { setEditing(false); onChange(val || text); }}
+              onKeyDown={e => { if (e.key === 'Enter') { setEditing(false); onChange(val || text); } }}
+            />
+          ) : (
+            <button className="text-left w-full" onClick={() => setEditing(true)}>{text}</button>
+          )}
+        </div>
+      );
+    }
+
+    function Keypad({ value, onSubmit, onClear, onClose }) {
+      const [buf, setBuf] = useState(value?.toString() ?? "");
+      useEffect(() => setBuf(value?.toString() ?? ""), [value]);
+
+      function clampNumberString(s) {
+        // remove non-digits, limit length to 2
+        const digits = (s || "").replace(/\D+/g, "").slice(0, 2);
+        return digits;
+      }
+      function push(d) { setBuf(prev => clampNumberString(prev + d)); }
+      function back() { setBuf(prev => prev.slice(0, -1)); }
+      function clear() { setBuf(""); onClear?.(); }
+      function enter() {
+        const n = buf === "" ? null : clamp(parseInt(buf, 10), 0, 50);
+        onSubmit?.(n);
+        onClose?.();
+      }
+
+      const Key = ({ children, onClick, className = "" }) => (
+        <button onClick={onClick} className={"h-14 rounded-xl border border-neutral-300 active:scale-95 text-lg " + className}>{children}</button>
+      );
+
+      return (
+        <div className="fixed inset-x-0 bottom-0 z-20 bg-white border-t border-neutral-200 p-4 shadow-[0_-8px_24px_rgba(0,0,0,0.08)]">
+          <div className="max-w-md mx-auto">
+            <div className="flex items-center justify-between mb-2">
+              <div className="text-sm text-neutral-500">Enter strokes</div>
+              <button className="px-3 py-1 rounded-lg border border-neutral-300" onClick={onClose}>Close</button>
+            </div>
+
+            <div className="mb-3 text-3xl font-semibold text-center tracking-wide">{buf || '—'}</div>
+
+            <div className="grid grid-cols-3 gap-2 select-none">
+              {[1,2,3,4,5,6,7,8,9].map(n => (
+                <Key key={n} onClick={() => push(String(n))}>{n}</Key>
+              ))}
+              <Key onClick={() => push("0")} className="col-span-2">0</Key>
+              <Key onClick={back}>⌫</Key>
+              <Key onClick={clear} className="col-span-1">Clear</Key>
+              <Key onClick={enter} className="col-span-2 bg-green-600 text-white">Enter</Key>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<GolfScorecardApp />);
+  </script>
+</body>
+</html>
